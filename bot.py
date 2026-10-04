@@ -209,6 +209,12 @@ async def lookup_and_reply(message, context, word):
     r = await asyncio.to_thread(sozluk.lookup, word)
 
     if not r["meanings"] and not r["deepl"]:
+        if r["errors"]:
+            # Kelime yok değil, kaynağa ulaşılamadı — sebebini göster ve loga yaz
+            log.warning("'%s' aranamadı: %s", word, "; ".join(r["errors"]))
+            text = "⚠️ " + "\n⚠️ ".join(html.escape(e) for e in r["errors"])
+            await message.reply_text(text, parse_mode=ParseMode.HTML)
+            return
         text = f"🤔 <b>{html.escape(word)}</b> bulunamadı."
         if r["suggestions"]:
             text += "\nBunu mu demek istedin?"

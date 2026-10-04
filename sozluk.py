@@ -11,6 +11,13 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
+try:
+    # Tureng Cloudflare arkasında; bulut sunucularından gelen sıradan istekleri engelleyebiliyor.
+    # curl_cffi istekleri gerçek bir Chrome tarayıcısının bağlantı imzasıyla gönderir.
+    from curl_cffi import requests as browser_requests
+except ImportError:
+    browser_requests = None
+
 BASE_DIR = Path(__file__).resolve().parent
 CACHE_DIR = BASE_DIR / "ses_onbellek"
 HEADERS = {
@@ -38,15 +45,31 @@ def clean(text):
     return re.sub(r"\s+", " ", text).strip()
 
 
+class TurengError(requests.RequestException):
+    pass
+
+
+def tureng_get(url):
+    """Tureng'den sayfa/dosya indirir; engellenirse anlaşılır bir hata verir."""
+    try:
+        if browser_requests:
+            resp = browser_requests.get(url, impersonate="chrome", timeout=15)
+        else:
+            resp = requests.get(url, headers=HEADERS, timeout=15)
+    except Exception as e:
+        raise TurengError(f"bağlantı hatası ({type(e).__name__})") from e
+    if resp.status_code != 200:
+        blocked = "Just a moment" in resp.text[:3000]
+        raise TurengError(f"HTTP {resp.status_code}" + (" — Cloudflare engeli" if blocked else ""))
+    return resp
+
+
 # --------------------------------------------------------------------------- #
 # 1) Tureng — anlamlar, ses
 # --------------------------------------------------------------------------- #
 def tureng_lookup(word):
     url = f"https://tureng.com/en/turkish-english/{requests.utils.quote(word)}"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    resp.encoding = "utf-8"
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(tureng_get(url).content.decode("utf-8", "replace"), "html.parser")
 
     # Başlıkları ve tabloları sırayla gez; "with other terms" tabloları birebir eşleşme değildir
     tables = []
@@ -110,10 +133,7 @@ def score_table(t):
 def tureng_sentences(word):
     """Tureng cümle sayfasından (EN, TR) çiftleri. Hem Türkçe hem İngilizce kelimeyle çalışır."""
     url = f"https://tureng.com/en/turkish-english-sentences/{requests.utils.quote(word)}"
-    resp = requests.get(url, headers=HEADERS, timeout=15)
-    resp.raise_for_status()
-    resp.encoding = "utf-8"
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(tureng_get(url).content.decode("utf-8", "replace"), "html.parser")
 
     pairs = []
     for pair in soup.select("table.sentencesSearchResultsTable div.sentencePair"):
@@ -286,9 +306,7 @@ def download_audio(url):
     CACHE_DIR.mkdir(exist_ok=True)
     path = CACHE_DIR / f"{hashlib.md5(url.encode()).hexdigest()}.mp3"
     if not path.exists():
-        resp = requests.get(url, headers=HEADERS, timeout=15)
-        resp.raise_for_status()
-        path.write_bytes(resp.content)
+        path.write_bytes(tureng_get(url).content)
     return path
 
 

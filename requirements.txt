@@ -1,5 +1,6 @@
 requests
 beautifulsoup4
+curl_cffi
 python-telegram-bot>=22,<23
 starlette>=0.40
 uvicorn>=0.30
