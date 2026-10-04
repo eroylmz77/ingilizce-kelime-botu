@@ -84,6 +84,8 @@ def format_result(r):
             line = f"<b>{i}.</b>{tag} {e(ex['en'])}"
             if ex.get("tr"):
                 line += f"\n    <i>{e(ex['tr'])}</i>"
+            if ex.get("meaning"):
+                line += f"\n    🏷 <i>anlam: {e(ex['meaning'])}</i>"
             lines.append(line)
         parts.append("✏️ <b>Örnek cümleler</b>\n" + "\n\n".join(lines))
 

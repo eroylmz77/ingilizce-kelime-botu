@@ -140,26 +140,58 @@ def tureng_sentences(word):
     url = f"https://tureng.com/en/turkish-english-sentences/{requests.utils.quote(word)}"
     soup = BeautifulSoup(tureng_get(url).content.decode("utf-8", "replace"), "html.parser")
 
-    pairs = []
-    for pair in soup.select("table.sentencesSearchResultsTable div.sentencePair"):
-        items = pair.select("li")
-        if len(items) >= 2:
-            pairs.append({"en": clean(items[0].get_text()), "tr": clean(items[1].get_text())})
+    # Cümleler anlam gruplarına ayrılmış: önce "save | kurtarmak" satırı, altında cümleleri
+    pairs, meaning = [], None
+    for tr in soup.select("table.sentencesSearchResultsTable tbody tr"):
+        cell = tr.find("td", class_="sentencesPerTermList")
+        if cell is None:
+            tds = tr.find_all("td")
+            if len(tds) >= 3:
+                en_term, tr_term = tds[1].get_text(strip=True), tds[2].get_text(strip=True)
+                # Anlam, aranan kelimenin karşı dildeki karşılığıdır
+                meaning = en_term if tr_term.lower() == word.lower() else tr_term
+            continue
+        for pair in cell.select("div.sentencePair"):
+            items = pair.select("li")
+            if len(items) >= 2:
+                pairs.append({"en": clean(items[0].get_text()), "tr": clean(items[1].get_text()),
+                              "meaning": meaning})
     return pairs
 
 
-def pick_examples(candidates, count=EXAMPLE_COUNT, pool_size=20):
-    """Tekrarları at; ilk adaylar içinden en kısa (öğrenmesi kolay) cümleleri seç,
-    sonra orijinal sıralarını koru."""
-    seen, unique = set(), []
+# Örnek cümle uzunluğu (kelime sayısı): çok kısa cümleler fazla basit kalıyor
+MIN_WORDS, IDEAL_WORDS, MAX_WORDS = 9, 14, 25
+
+
+def pick_examples(candidates, count=EXAMPLE_COUNT):
+    """Her cümleyi kelimenin farklı bir anlamından seç (anlamlar sırayla dolaşılır);
+    her anlamda ideal uzunluğa en yakın cümleyi al. Uygun uzunlukta cümle kalmazsa
+    uzunluk şartını gevşet."""
+    seen, groups = set(), {}
     for c in candidates:
         key = c["en"].lower().rstrip(".!? ")
         if key not in seen:
             seen.add(key)
-            unique.append(c)
-    pool = unique[:pool_size]
-    shortest = sorted(pool, key=lambda c: len(c["en"]))[:count]
-    return [c for c in pool if c in shortest]
+            groups.setdefault(c.get("meaning"), []).append(c)
+
+    def words(c):
+        return len(c["en"].split())
+
+    pools = [sorted(g, key=lambda c: abs(words(c) - IDEAL_WORDS)) for g in groups.values()]
+    chosen = []
+    for strict in (True, False):
+        progress = True
+        while len(chosen) < count and progress:
+            progress = False
+            for pool in pools:
+                if len(chosen) >= count:
+                    break
+                pick = next((c for c in pool if c not in chosen
+                             and (not strict or MIN_WORDS <= words(c) <= MAX_WORDS)), None)
+                if pick:
+                    chosen.append(pick)
+                    progress = True
+    return chosen
 
 
 # Yazılım cümlesi tespiti: güçlü kelime tek başına yeter; zayıf kelimeler
