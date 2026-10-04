@@ -229,6 +229,19 @@ def now_istanbul():
     return datetime.now(ISTANBUL)
 
 
+def enable_daily(uid, at=None):
+    """Günlük kelimeyi açar. Saat bugün için geçtiyse bugünü "gönderildi" sayar ki
+    ayar yapılır yapılmaz kelime gelmesin. İlk gönderim bugünse True döner."""
+    at = at or daily_settings(uid).get("time", "09:00")
+    now = now_istanbul()
+    fields = {"enabled": True, "time": at}
+    passed = now.strftime("%H:%M") >= at
+    if passed:
+        fields["last"] = now.strftime("%Y-%m-%d")
+    set_daily(uid, **fields)
+    return not passed
+
+
 def users_due_daily():
     """Saati gelmiş ve bugün henüz kelime almamış kullanıcılar."""
     now = now_istanbul()

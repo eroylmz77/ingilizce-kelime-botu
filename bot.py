@@ -407,10 +407,11 @@ async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     arg = update.message.text.partition(" ")[2].strip().lower()
 
+    first = None  # ilk kelime bugün mü yarın mı gelecek
     if arg in ("ac", "aç", "on"):
-        await asyncio.to_thread(defter.set_daily, uid, enabled=True)
+        first = await asyncio.to_thread(defter.enable_daily, uid)
     elif re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", arg):
-        await asyncio.to_thread(defter.set_daily, uid, enabled=True, time=arg.zfill(5))
+        first = await asyncio.to_thread(defter.enable_daily, uid, arg.zfill(5))
     elif arg in ("kapat", "off"):
         await asyncio.to_thread(defter.set_daily, uid, enabled=False)
     elif arg in ("simdi", "şimdi"):
@@ -425,6 +426,9 @@ async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     d = await asyncio.to_thread(defter.daily_settings, uid)
     if d.get("enabled"):
         status = f"✅ Açık — her gün saat <b>{d.get('time', '09:00')}</b>'da (Türkiye saati)."
+        if first is False:
+            status += ("\nBugünün saati geçtiği için ilk kelime <b>yarın</b> gelecek. "
+                       "Hemen istersen: /gunluk simdi")
     else:
         status = "⏸ Kapalı."
     await update.message.reply_text(
