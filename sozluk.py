@@ -253,7 +253,7 @@ def deepl_translate(texts, source_lang, target_lang):
 
 
 # --------------------------------------------------------------------------- #
-# 3b) Cümle çevirisi — DeepL (dili kendisi algılar)
+# 3b) Cümle çevirisi — DeepL, anahtarı yoksa Gemini/OpenAI (dili kendileri algılar)
 # --------------------------------------------------------------------------- #
 def is_sentence(text):
     """3 kelimeden uzunsa ya da noktalama ile bitiyorsa cümle say
@@ -264,10 +264,10 @@ def is_sentence(text):
 
 def translate_sentence(text):
     text = clean(text)
-    result = {"text": text, "translation": None, "source_lang": None, "english": None, "error": None}
+    result = {"text": text, "translation": None, "source_lang": None, "english": None,
+              "error": None, "engine": "DeepL"}
     if not os.environ.get("DEEPL_API_KEY"):
-        result["error"] = "Cümle çevirisi için DEEPL_API_KEY gerekli (.env dosyasına ekle)."
-        return result
+        return translate_with_ai(result)
     try:
         # Türkçe harf varsa doğrudan İngilizceye; yoksa Türkçeye çevir, DeepL metni
         # Türkçe algılarsa İngilizceye tekrar çevir
@@ -287,6 +287,31 @@ def translate_sentence(text):
         source_lang=detected,
         # Seslendirilecek taraf her zaman İngilizce olan
         english=text if detected == "en" else out["text"],
+    )
+    return result
+
+
+def translate_with_ai(result):
+    """DeepL anahtarı yoksa çeviriyi öğretmenin kullandığı model (Gemini/OpenAI) yapar."""
+    import ogretmen  # sözlük modülü öğretmen olmadan da çalışabilsin diye burada
+
+    engine = ogretmen.provider_label()
+    if engine is None:
+        result["error"] = ("Cümle çevirisi için GEMINI_API_KEY (ücretsiz) ya da DEEPL_API_KEY "
+                           "gerekli (.env dosyasına / Render'a ekle).")
+        return result
+    try:
+        out = ogretmen.translate(result["text"])
+    except ogretmen.TeacherError as e:
+        result["error"] = f"{engine} çeviri hatası: {e}"
+        return result
+
+    detected = out["source_lang"]
+    result.update(
+        engine=engine,
+        translation=out["translation"],
+        source_lang=detected,
+        english=result["text"] if detected == "en" else out["translation"],
     )
     return result
 

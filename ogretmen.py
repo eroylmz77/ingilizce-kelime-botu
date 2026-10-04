@@ -6,6 +6,7 @@ Gemini ve OpenAI aynı "chat completions" formatını kabul ettiği için tek ko
 """
 
 import html
+import json
 import os
 import re
 
@@ -44,15 +45,45 @@ def active_provider():
     return None
 
 
+def provider_label():
+    provider = active_provider()
+    return {"gemini": "Gemini", "openai": "OpenAI"}[provider[0]] if provider else None
+
+
 def ask(history, question):
     """history: önceki [{"role", "content"}] mesajları. Cevap metnini döndürür."""
-    provider = active_provider()
-    if provider is None:
-        raise TeacherError("Öğretmen için GEMINI_API_KEY ya da OPENAI_API_KEY tanımlı değil.")
-    name, url, key, model = provider
-
     messages = [{"role": "system", "content": SYSTEM_PROMPT}, *history[-HISTORY_LIMIT:],
                 {"role": "user", "content": question}]
+    return _chat(messages)
+
+
+TRANSLATE_PROMPT = """You are a professional Turkish-English translator.
+Detect the language of the user's text. If it is Turkish, translate it into natural English.
+Otherwise translate it into natural Turkish. Keep the meaning, tone and technical terms.
+Reply with ONLY a JSON object, no other text:
+{"source_lang": "<ISO 639-1 code of the original, e.g. tr or en>", "translation": "<translation>"}"""
+
+
+def translate(text):
+    """Cümleyi çevirir: {"source_lang": "tr"/"en"/..., "translation": "..."}"""
+    content = _chat([{"role": "system", "content": TRANSLATE_PROMPT},
+                     {"role": "user", "content": text}])
+    match = re.search(r"\{.*\}", content, re.DOTALL)  # model JSON'u ``` içine alabilir
+    try:
+        data = json.loads(match.group(0)) if match else {}
+    except ValueError:
+        data = {}
+    if not data.get("translation"):
+        raise TeacherError("Çeviri cevabı anlaşılamadı, tekrar dener misin?")
+    return {"source_lang": str(data.get("source_lang", "")).lower()[:2] or "?",
+            "translation": data["translation"].strip()}
+
+
+def _chat(messages):
+    provider = active_provider()
+    if provider is None:
+        raise TeacherError("GEMINI_API_KEY ya da OPENAI_API_KEY tanımlı değil.")
+    name, url, key, model = provider
     try:
         resp = requests.post(url, headers={"Authorization": f"Bearer {key}"},
                              json={"model": model, "messages": messages}, timeout=60)

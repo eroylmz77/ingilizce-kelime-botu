@@ -148,7 +148,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔊 okunuşu, sesli olarak (ElevenLabs)\n"
         "✏️ 5 örnek cümle\n\n"
         "Örnek: apple, vazgeçmek, give up\n\n"
-        "📝 Bir cümle yazarsan onu da DeepL ile çeviririm.\n"
+        "📝 Bir cümle yazarsan onu da çeviririm (DeepL, yoksa Gemini).\n"
         "Örnek: I gave up on that bug yesterday.\n\n"
         "👩‍🏫 İngilizce öğretmenine soru sormak için /sor yaz:\n"
         "/sor present perfect ne zaman kullanılır?\n"
@@ -224,7 +224,7 @@ def format_sentence(t):
     flags = {"tr": "🇹🇷", "en": "🇬🇧"}
     target = "en" if t["source_lang"] == "tr" else "tr"
     direction = f"{flags.get(t['source_lang'], t['source_lang'].upper())} → {flags[target]}"
-    return (f"📝 <b>Cümle çevirisi</b> (DeepL)   {direction}\n\n"
+    return (f"📝 <b>Cümle çevirisi</b> ({t['engine']})   {direction}\n\n"
             f"<i>{e(t['text'])}</i>\n\n"
             f"<b>{e(t['translation'])}</b>")
 
