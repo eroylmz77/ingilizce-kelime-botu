@@ -14,12 +14,13 @@ import hashlib
 import html
 import logging
 import os
+import re
 import sys
 from itertools import count
 
 import requests
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import BotCommand, InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.error import BadRequest
 from telegram.ext import (
@@ -31,6 +32,7 @@ from telegram.ext import (
     filters,
 )
 
+import defter
 import ogretmen
 import sozluk
 
@@ -121,19 +123,29 @@ def suggestion_keyboard(suggestions):
 # --------------------------------------------------------------------------- #
 # Ses gönderme
 # --------------------------------------------------------------------------- #
-async def send_audio(message, context, text, fallback_url=None):
-    await context.bot.send_chat_action(message.chat_id, ChatAction.RECORD_VOICE)
+async def send_audio(context, chat_id, text, fallback_url=None):
+    await context.bot.send_chat_action(chat_id, ChatAction.RECORD_VOICE)
     try:
         path = await asyncio.to_thread(sozluk.audio_for, text, fallback_url)
     except Exception as exc:  # ağ / API hatası
         log.warning("Ses alınamadı: %s", exc)
-        await message.reply_text("⚠️ Ses alınamadı, biraz sonra tekrar dene.")
+        await context.bot.send_message(chat_id, "⚠️ Ses alınamadı, biraz sonra tekrar dene.")
         return
     if path is None:
-        await message.reply_text("🔇 Bu metin için ses yok (ELEVENLABS_API_KEY tanımlı değil).")
+        await context.bot.send_message(
+            chat_id, "🔇 Bu metin için ses yok (ELEVENLABS_API_KEY tanımlı değil).")
         return
     with open(path, "rb") as f:
-        await message.reply_voice(voice=f, caption=text[:1024])
+        await context.bot.send_voice(chat_id, voice=f, caption=text[:1024])
+
+
+async def send_ai_text(message, text):
+    """Yapay zekâ cevabını Telegram biçimine çevirip (gerekirse bölerek) gönderir."""
+    for part in ogretmen.split_message(text):
+        try:
+            await message.reply_text(ogretmen.to_telegram_html(part), parse_mode=ParseMode.HTML)
+        except BadRequest:  # biçimlendirme Telegram'a uymadıysa düz metin gönder
+            await message.reply_text(part)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +166,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/sor present perfect ne zaman kullanılır?\n"
         "/sor \"I am agree with you\" doğru mu?\n"
         "Öğretmen konuşmayı hatırlar; yeni konuya geçmek için /sifirla.\n\n"
+        "✍️ /duzelt + metin → commit mesajı, e-posta, Slack mesajını düzeltirim.\n"
+        "/duzelt Fixed the bug which was causing crash\n\n"
+        "📒 Aradığın kelimeler deftere kaydedilir:\n"
+        "/tekrar → defterdeki kelimelerle sınav\n"
+        "/defter → kelime listen · /sil kelime → defterden çıkar\n\n"
+        "☀️ /gunluk ac → her sabah 09:00'da yazılım dünyasından bir kelime\n\n"
         f"Kullanıcı ID'n: {user.id}"
     )
 
@@ -179,16 +197,235 @@ async def ask_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     history += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
     del history[:-ogretmen.HISTORY_LIMIT]
-    for part in ogretmen.split_message(answer):
-        try:
-            await update.message.reply_text(ogretmen.to_telegram_html(part), parse_mode=ParseMode.HTML)
-        except BadRequest:  # biçimlendirme Telegram'a uymadıysa düz metin gönder
-            await update.message.reply_text(part)
+    await send_ai_text(update.message, answer)
 
 
 async def reset_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.chat_data.pop("ogretmen", None)
     await update.message.reply_text("🧹 Öğretmen konuşmayı unuttu, yeni bir konuya geçebilirsin.")
+
+
+async def correct_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Bu bot özel kullanım içindir.")
+        return
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text(
+            "Düzeltmemi istediğin metni komutun yanına yaz 🙂\n"
+            "Örnek: /duzelt Fixed the bug which was causing crash\n"
+            "(Çok satırlı metinler de olur: commit mesajı, e-posta, PR açıklaması...)")
+        return
+    await context.bot.send_chat_action(update.message.chat_id, ChatAction.TYPING)
+    try:
+        answer = await asyncio.to_thread(ogretmen.correct, text)
+    except ogretmen.TeacherError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+    await send_ai_text(update.message, answer)
+
+
+# --------------------------------------------------------------------------- #
+# Kelime defteri ve tekrar sınavı
+# --------------------------------------------------------------------------- #
+def save_to_notebook(uid, r):
+    """Aranan kelimeyi deftere ekler; veritabanı sorunu aramayı bozmasın."""
+    entry = defter.entry_from_lookup(r)
+    if entry is None:
+        return False
+    try:
+        return defter.add_word(uid, entry)
+    except Exception as exc:
+        log.warning("Deftere eklenemedi: %s", exc)
+        return False
+
+
+async def show_notebook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    uid = update.effective_user.id
+    words = await asyncio.to_thread(defter.words, uid)
+    if not words:
+        await update.message.reply_text(
+            "📒 Defterin henüz boş. Bir kelime aradığında otomatik eklenir 🙂")
+        return
+    st = await asyncio.to_thread(defter.stats, uid)
+    e = html.escape
+    latest = sorted(words.values(), key=lambda w: w["added"], reverse=True)[:30]
+    lines = [f"• <b>{e(w['en'])}</b> — {e(w['tr'])}  {'⭐' * (w['box'] - 1)}" for w in latest]
+    text = (f"📒 <b>Kelime defterin</b>: {st['total']} kelime · {st['learned']} öğrenildi · "
+            f"{st['due']} tekrar bekliyor\n\n" + "\n".join(lines))
+    if st["total"] > len(latest):
+        text += f"\n… ve {st['total'] - len(latest)} kelime daha"
+    text += "\n\n⭐ = kaç kez üst üste bildin · /tekrar ile çalış · /sil kelime ile çıkar"
+    if not defter.is_persistent():
+        text += ("\n\n⚠️ <i>Kalıcı veritabanı (MONGODB_URI) bağlı değil: bot yeniden "
+                 "başlayınca defter silinir.</i>")
+    await update.message.reply_text(text, parse_mode=ParseMode.HTML)
+
+
+async def delete_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    text = update.message.text.partition(" ")[2].strip()
+    if not text:
+        await update.message.reply_text("Silmek istediğin kelimeyi yaz: /sil abandon")
+        return
+    removed = await asyncio.to_thread(defter.remove_word, update.effective_user.id, text)
+    await update.message.reply_text(
+        f"🗑 {removed} defterden çıkarıldı." if removed else f"'{text}' defterde bulunamadı.")
+
+
+async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    uid = update.effective_user.id
+    questions, early = await asyncio.to_thread(defter.build_quiz, uid)
+    if not questions:
+        await update.message.reply_text(
+            "📒 Defterin boş. Önce birkaç kelime ara, sonra /tekrar ile çalışalım 🙂")
+        return
+    context.chat_data["quiz"] = {"id": next(_ids), "uid": uid, "questions": questions,
+                                 "i": 0, "score": 0}
+    intro = (f"🧠 Tekrar zamanı! {len(questions)} soru.")
+    if early:
+        intro = ("✨ Bugün tekrar zamanı gelen kelime yok, yine de en yakın "
+                 f"{len(questions)} kelimeyle pratik yapalım.")
+    await update.message.reply_text(intro)
+    await send_question(context, update.message.chat_id)
+
+
+def question_text(quiz):
+    q = quiz["questions"][quiz["i"]]
+    flag, ask = ("🇬🇧", "Türkçesi ne?") if q["direction"] == "en" else ("🇹🇷", "İngilizcesi ne?")
+    return (f"❓ <b>{quiz['i'] + 1}/{len(quiz['questions'])}</b>   "
+            f"{flag} <b>{html.escape(q['prompt'])}</b>\n{ask}")
+
+
+async def send_question(context, chat_id):
+    quiz = context.chat_data["quiz"]
+    q = quiz["questions"][quiz["i"]]
+    prefix = f"t:{quiz['id']}:{quiz['i']}"
+    if q["kind"] == "choice":
+        rows = [[InlineKeyboardButton(opt[:60], callback_data=f"{prefix}:{j}")]
+                for j, opt in enumerate(q["options"])]
+    else:
+        rows = [[InlineKeyboardButton("👀 Cevabı göster", callback_data=f"{prefix}:show")]]
+    await context.bot.send_message(chat_id, question_text(quiz), parse_mode=ParseMode.HTML,
+                                   reply_markup=InlineKeyboardMarkup(rows))
+
+
+async def handle_quiz_button(query, context):
+    _, quiz_id, index, choice = query.data.split(":")
+    quiz = context.chat_data.get("quiz")
+    # Eski bir sınavın ya da zaten cevaplanmış sorunun butonuna basıldıysa yok say
+    if not quiz or str(quiz["id"]) != quiz_id or str(quiz["i"]) != index:
+        await query.edit_message_reply_markup(None)
+        return
+    q = quiz["questions"][quiz["i"]]
+    e = html.escape
+
+    if choice == "show":  # kart sorusu: önce cevabı göster, sonra kendini değerlendir
+        prefix = f"t:{quiz_id}:{index}"
+        await query.edit_message_text(
+            f"{question_text(quiz)}\n\n👉 <b>{e(q['answer'])}</b>", parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Bildim", callback_data=f"{prefix}:yes"),
+                InlineKeyboardButton("❌ Bilemedim", callback_data=f"{prefix}:no")]]))
+        return
+
+    correct = choice == "yes" if choice in ("yes", "no") else int(choice) == q["correct"]
+    await asyncio.to_thread(defter.record_answer, quiz["uid"], q["key"], correct)
+    quiz["score"] += correct
+    quiz["i"] += 1
+
+    feedback = "✅ <b>Doğru!</b>" if correct else f"❌ Doğrusu: <b>{e(q['answer'])}</b>"
+    if q.get("example"):
+        feedback += f"\n\n✏️ <i>{e(q['example']['en'])}</i>"
+        if q["example"].get("tr"):
+            feedback += f"\n    {e(q['example']['tr'])}"
+    await query.edit_message_text(f"{question_text({**quiz, 'i': quiz['i'] - 1})}\n\n{feedback}",
+                                  parse_mode=ParseMode.HTML)
+
+    if quiz["i"] < len(quiz["questions"]):
+        await send_question(context, query.message.chat_id)
+        return
+    total = len(quiz["questions"])
+    st = await asyncio.to_thread(defter.stats, quiz["uid"])
+    del context.chat_data["quiz"]
+    await context.bot.send_message(
+        query.message.chat_id,
+        f"🏁 Bitti! <b>{quiz['score']}/{total}</b> doğru.\n"
+        f"📒 Defterinde {st['total']} kelime var, {st['learned']} tanesini öğrendin.\n"
+        "Bilemediklerin bir sonraki /tekrar'da yine gelecek; bildiklerin daha seyrek sorulacak.",
+        parse_mode=ParseMode.HTML)
+
+
+# --------------------------------------------------------------------------- #
+# Günün kelimesi
+# --------------------------------------------------------------------------- #
+async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        return
+    uid = update.effective_user.id
+    arg = update.message.text.partition(" ")[2].strip().lower()
+
+    if arg in ("ac", "aç", "on"):
+        await asyncio.to_thread(defter.set_daily, uid, enabled=True)
+    elif re.fullmatch(r"([01]?\d|2[0-3]):[0-5]\d", arg):
+        await asyncio.to_thread(defter.set_daily, uid, enabled=True, time=arg.zfill(5))
+    elif arg in ("kapat", "off"):
+        await asyncio.to_thread(defter.set_daily, uid, enabled=False)
+    elif arg in ("simdi", "şimdi"):
+        word = await asyncio.to_thread(defter.pick_daily_word, uid, defter.DAILY_WORDS)
+        context.job_queue.run_once(send_daily_word, 0, chat_id=update.message.chat_id,
+                                   user_id=uid, data=word)
+        return
+    elif arg:
+        await update.message.reply_text("Anlayamadım 🙂 Örnek: /gunluk ac, /gunluk 08:30, /gunluk kapat")
+        return
+
+    d = await asyncio.to_thread(defter.daily_settings, uid)
+    if d.get("enabled"):
+        status = f"✅ Açık — her gün saat <b>{d.get('time', '09:00')}</b>'da (Türkiye saati)."
+    else:
+        status = "⏸ Kapalı."
+    await update.message.reply_text(
+        f"☀️ <b>Günün kelimesi</b>: {status}\n\n"
+        "/gunluk ac → aç (09:00)\n/gunluk 08:30 → saati değiştir\n"
+        "/gunluk kapat → kapat\n/gunluk simdi → hemen bir tane gönder",
+        parse_mode=ParseMode.HTML)
+
+
+async def daily_tick(context: ContextTypes.DEFAULT_TYPE):
+    """Her dakika çalışır: saati gelmiş kullanıcılara günün kelimesini gönderir.
+    Bot uyurken saat kaçtıysa, uyandığında gönderir."""
+    try:
+        due = await asyncio.to_thread(defter.users_due_daily)
+    except Exception as exc:
+        log.warning("Günlük kelime kontrolü yapılamadı: %s", exc)
+        return
+    for uid in due:
+        word = await asyncio.to_thread(defter.pick_daily_word, uid, defter.DAILY_WORDS)
+        # Önce işaretle: gönderim uzun sürerse bir sonraki kontrol tekrar göndermesin
+        await asyncio.to_thread(defter.mark_daily_sent, uid, word)
+        context.job_queue.run_once(send_daily_word, 0, chat_id=uid, user_id=uid, data=word)
+
+
+async def send_daily_word(context: ContextTypes.DEFAULT_TYPE):
+    chat_id, word = context.job.chat_id, context.job.data
+    r = await asyncio.to_thread(sozluk.lookup, word)
+    if not r["meanings"]:
+        log.warning("Günün kelimesi '%s' bulunamadı: %s", word, r["errors"])
+        return
+    added = await asyncio.to_thread(save_to_notebook, context.job.user_id, r)
+    rid = remember(context, r)
+    text = "☀️ <b>Günün kelimesi</b>\n\n" + format_result(r)
+    if added:
+        text += "\n\n📒 <i>Deftere eklendi · /tekrar</i>"
+    await context.bot.send_message(chat_id, text, parse_mode=ParseMode.HTML,
+                                   reply_markup=result_keyboard(rid, r))
+    await send_audio(context, chat_id, r["english"], r["tureng_audio"])
 
 
 async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -206,7 +443,7 @@ async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(text) > MAX_QUERY_LEN:
         await update.message.reply_text("Lütfen tek bir kelime ya da kısa bir kalıp gönder 🙂")
         return
-    await lookup_and_reply(update.message, context, text.rstrip(".?!"))
+    await lookup_and_reply(update.message, context, text.rstrip(".?!"), update.effective_user.id)
 
 
 def remember(context, r):
@@ -245,7 +482,7 @@ async def translate_and_reply(message, context, text):
     await message.reply_text(format_sentence(t), parse_mode=ParseMode.HTML, reply_markup=keyboard)
 
 
-async def lookup_and_reply(message, context, word):
+async def lookup_and_reply(message, context, word, uid):
     await context.bot.send_chat_action(message.chat_id, ChatAction.TYPING)
     r = await asyncio.to_thread(sozluk.lookup, word)
 
@@ -264,10 +501,12 @@ async def lookup_and_reply(message, context, word):
         return
 
     rid = remember(context, r)
-    await message.reply_text(format_result(r), parse_mode=ParseMode.HTML,
-                             reply_markup=result_keyboard(rid, r))
+    text = format_result(r)
+    if await asyncio.to_thread(save_to_notebook, uid, r):
+        text += "\n\n📒 <i>Deftere eklendi · /tekrar</i>"
+    await message.reply_text(text, parse_mode=ParseMode.HTML, reply_markup=result_keyboard(rid, r))
     if r["english"]:
-        await send_audio(message, context, r["english"], r["tureng_audio"])
+        await send_audio(context, message.chat_id, r["english"], r["tureng_audio"])
 
 
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -278,19 +517,24 @@ async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data
 
     if data.startswith("q:"):  # öneri butonu -> o kelimeyi ara
-        await lookup_and_reply(query.message, context, data[2:])
+        await lookup_and_reply(query.message, context, data[2:], query.from_user.id)
+        return
+
+    if data.startswith("t:"):  # tekrar sınavı cevabı
+        await handle_quiz_button(query, context)
         return
 
     if data.startswith("s:"):  # seslendirme butonu
         _, rid, which = data.split(":")
         r = context.chat_data.get("results", {}).get(int(rid))
+        chat_id = query.message.chat_id
         if r is None:
             await query.message.reply_text("Bu sonuç eskidi, kelimeyi tekrar gönder 🙂")
             return
         if which == "w":
-            await send_audio(query.message, context, r["english"], r["tureng_audio"])
+            await send_audio(context, chat_id, r["english"], r["tureng_audio"])
         else:
-            await send_audio(query.message, context, r["examples"][int(which)]["en"])
+            await send_audio(context, chat_id, r["examples"][int(which)]["en"])
 
 
 async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
@@ -304,14 +548,40 @@ def build_app(token, webhook):
     builder = Application.builder().token(token).concurrent_updates(True)
     if webhook:
         builder = builder.updater(None)  # güncellemeleri web sunucusu getirir
-    app = builder.build()
+    app = builder.post_init(set_commands).build()
     app.add_handler(CommandHandler(["start", "help", "yardim"], start))
     app.add_handler(CommandHandler("sor", ask_teacher))
     app.add_handler(CommandHandler("sifirla", reset_teacher))
+    app.add_handler(CommandHandler("duzelt", correct_text))
+    app.add_handler(CommandHandler("defter", show_notebook))
+    app.add_handler(CommandHandler("sil", delete_word))
+    app.add_handler(CommandHandler("tekrar", start_quiz))
+    app.add_handler(CommandHandler("gunluk", daily_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_word))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_error_handler(on_error)
+    app.job_queue.run_repeating(daily_tick, interval=60, first=15)
     return app
+
+
+COMMANDS = [
+    ("sor", "İngilizce öğretmenine soru sor"),
+    ("duzelt", "İngilizce metnini düzelt (commit, e-posta...)"),
+    ("tekrar", "Defterdeki kelimelerle sınav"),
+    ("defter", "Kelime defterini göster"),
+    ("gunluk", "Günün kelimesi ayarları"),
+    ("sil", "Defterden kelime çıkar"),
+    ("sifirla", "Öğretmen konuşmasını sıfırla"),
+    ("start", "Botun kullanımı"),
+]
+
+
+async def set_commands(app):
+    """Telegram'da "/" yazınca çıkan komut menüsü."""
+    try:
+        await app.bot.set_my_commands([BotCommand(c, d) for c, d in COMMANDS])
+    except Exception as exc:
+        log.warning("Komut menüsü ayarlanamadı: %s", exc)
 
 
 async def run_webhook(app, token, base_url):
@@ -343,6 +613,7 @@ async def run_webhook(app, token, base_url):
     server = uvicorn.Server(uvicorn.Config(web, host="0.0.0.0", port=port, log_level="warning"))
 
     async with app:
+        await set_commands(app)  # post_init sadece run_polling'de kendiliğinden çalışır
         await app.bot.set_webhook(f"{base_url}/telegram", secret_token=secret,
                                   allowed_updates=Update.ALL_TYPES)
         await app.start()
@@ -373,6 +644,10 @@ def main():
         log.info("Öğretmen: %s (%s)", provider[0], provider[3])
     else:
         log.warning("GEMINI_API_KEY / OPENAI_API_KEY tanımlı değil — /sor devre dışı.")
+    if defter.is_persistent():
+        log.info("Kelime defteri: MongoDB")
+    else:
+        log.warning("MONGODB_URI tanımlı değil — kelime defteri yerel dosyada (kalıcı değil).")
 
     # Render bu değişkeni kendisi tanımlar; başka bir sunucuda WEBHOOK_URL kullanılabilir
     base_url = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL") or "").rstrip("/")

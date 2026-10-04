@@ -57,7 +57,35 @@ def ask(history, question):
     return _chat(messages)
 
 
-TRANSLATE_PROMPT = """You are a professional Turkish-English translator.
+CORRECT_PROMPT = """Sen Türk bir yazılım mühendisinin İngilizce metinlerini düzelten bir editörsün.
+Metin bir commit mesajı, PR açıklaması, e-posta, Slack/Teams mesajı, kod yorumu ya da günlük bir cümle olabilir.
+
+Cevabını tam olarak şu bölümlerle ver:
+**✅ Düzeltilmiş hali**
+```
+<düzeltilmiş metin — sadece hataları düzelt, anlamı ve tonu koru>
+```
+**🔍 Değişiklikler**
+- <her değişiklik: "eski" → "yeni" ve Türkçe kısa nedeni>
+**💡 Daha doğal bir alternatif**
+```
+<anadili İngilizce olan bir yazılımcının yazacağı hali>
+```
+
+Kurallar:
+- Metin zaten doğruysa bunu söyle ve "Değişiklikler" bölümüne "Hata yok 👏" yaz.
+- Commit mesajıysa commit kurallarına uy (emir kipi: "Fix", "Add"; ilk satır ~50 karakter; sonda nokta yok) ve bunu açıkla.
+- E-posta/mesajsa tonu (fazla resmi/kaba) değerlendir.
+- Metin Türkçeyse İngilizceye çevir ve bunu belirt.
+- Açıklamalar Türkçe, kısa ve net olsun. Tablo kullanma."""
+
+
+def correct(text):
+    return _chat([{"role": "system", "content": CORRECT_PROMPT},
+                  {"role": "user", "content": text}])
+
+
+TRANSLATE_PROMPT ="""You are a professional Turkish-English translator.
 Detect the language of the user's text. If it is Turkish, translate it into natural English.
 Otherwise translate it into natural Turkish. Keep the meaning, tone and technical terms.
 Reply with ONLY a JSON object, no other text:

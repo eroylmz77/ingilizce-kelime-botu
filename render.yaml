@@ -25,3 +25,6 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      # Kelime defteri ve günün kelimesi ayarları için kalıcı veritabanı (MongoDB Atlas M0)
+      - key: MONGODB_URI
+        sync: false
