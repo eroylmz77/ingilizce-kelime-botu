@@ -1,0 +1,6 @@
+# Gizli anahtarlar — asla GitHub'a yüklenmemeli
+.env
+
+ses_onbellek/
+__pycache__/
+*.pyc

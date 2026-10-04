@@ -1,0 +1,22 @@
+# Render "Blueprint" tanımı: Render bu dosyayı okuyup servisi kendisi kurar.
+services:
+  - type: web
+    name: ingilizce-kelime-botu
+    runtime: python
+    plan: free
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # sync: false -> değerleri Render kurulum sırasında senden ister (GitHub'a yüklenmez)
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_USER_IDS
+        sync: false
+      - key: DEEPL_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
