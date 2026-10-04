@@ -21,6 +21,7 @@ import requests
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -30,6 +31,7 @@ from telegram.ext import (
     filters,
 )
 
+import ogretmen
 import sozluk
 
 logging.basicConfig(format="%(asctime)s %(levelname)s %(message)s", level=logging.INFO)
@@ -148,8 +150,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Örnek: apple, vazgeçmek, give up\n\n"
         "📝 Bir cümle yazarsan onu da DeepL ile çeviririm.\n"
         "Örnek: I gave up on that bug yesterday.\n\n"
+        "👩‍🏫 İngilizce öğretmenine soru sormak için /sor yaz:\n"
+        "/sor present perfect ne zaman kullanılır?\n"
+        "/sor \"I am agree with you\" doğru mu?\n"
+        "Öğretmen konuşmayı hatırlar; yeni konuya geçmek için /sifirla.\n\n"
         f"Kullanıcı ID'n: {user.id}"
     )
+
+
+async def ask_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_allowed(update):
+        await update.message.reply_text("⛔ Bu bot özel kullanım içindir.")
+        return
+    # "/sor" sonrasındaki metnin tamamı (satır sonları dahil)
+    question = update.message.text.partition(" ")[2].strip()
+    if not question:
+        await update.message.reply_text(
+            "Sorunu komutun yanına yaz 🙂\nÖrnek: /sor 'since' ile 'for' farkı nedir?")
+        return
+
+    await context.bot.send_chat_action(update.message.chat_id, ChatAction.TYPING)
+    history = context.chat_data.setdefault("ogretmen", [])
+    try:
+        answer = await asyncio.to_thread(ogretmen.ask, list(history), question)
+    except ogretmen.TeacherError as exc:
+        await update.message.reply_text(f"⚠️ {exc}")
+        return
+
+    history += [{"role": "user", "content": question}, {"role": "assistant", "content": answer}]
+    del history[:-ogretmen.HISTORY_LIMIT]
+    for part in ogretmen.split_message(answer):
+        try:
+            await update.message.reply_text(ogretmen.to_telegram_html(part), parse_mode=ParseMode.HTML)
+        except BadRequest:  # biçimlendirme Telegram'a uymadıysa düz metin gönder
+            await update.message.reply_text(part)
+
+
+async def reset_teacher(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.chat_data.pop("ogretmen", None)
+    await update.message.reply_text("🧹 Öğretmen konuşmayı unuttu, yeni bir konuya geçebilirsin.")
 
 
 async def handle_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -267,6 +306,8 @@ def build_app(token, webhook):
         builder = builder.updater(None)  # güncellemeleri web sunucusu getirir
     app = builder.build()
     app.add_handler(CommandHandler(["start", "help", "yardim"], start))
+    app.add_handler(CommandHandler("sor", ask_teacher))
+    app.add_handler(CommandHandler("sifirla", reset_teacher))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_word))
     app.add_handler(CallbackQueryHandler(handle_button))
     app.add_error_handler(on_error)
@@ -327,6 +368,11 @@ def main():
     for key in ("DEEPL_API_KEY", "ELEVENLABS_API_KEY"):
         if not os.environ.get(key):
             log.warning("%s tanımlı değil — bu özellik devre dışı.", key)
+    provider = ogretmen.active_provider()
+    if provider:
+        log.info("Öğretmen: %s (%s)", provider[0], provider[3])
+    else:
+        log.warning("GEMINI_API_KEY / OPENAI_API_KEY tanımlı değil — /sor devre dışı.")
 
     # Render bu değişkeni kendisi tanımlar; başka bir sunucuda WEBHOOK_URL kullanılabilir
     base_url = (os.environ.get("RENDER_EXTERNAL_URL") or os.environ.get("WEBHOOK_URL") or "").rstrip("/")

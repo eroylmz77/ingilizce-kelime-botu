@@ -20,3 +20,8 @@ services:
         sync: false
       - key: ELEVENLABS_API_KEY
         sync: false
+      # İngilizce öğretmeni (/sor): ikisinden biri yeterli
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
