@@ -289,7 +289,8 @@ async def run_webhook(app, token, base_url):
         return Response()
 
     async def health(_: Request):
-        return PlainTextResponse("ok")
+        # Render hangi commit'in çalıştığını RENDER_GIT_COMMIT ile bildirir
+        return PlainTextResponse(f"ok {os.environ.get('RENDER_GIT_COMMIT', '')[:7]}".strip())
 
     web = Starlette(routes=[
         Route("/telegram", telegram, methods=["POST"]),

@@ -86,6 +86,11 @@ def tureng_lookup(word):
 
     tables = [t for t in tables if t["rows"]]
     if not tables:
+        # Gerçek bir "sonuç yok" sayfası mı, yoksa engel/doğrulama sayfası mı?
+        headings = " ".join(h.get_text() for h in soup.find_all("h2"))
+        if "Or try these" not in headings and "Meanings of" not in headings and not suggestions:
+            title = clean(soup.title.get_text()) if soup.title else "başlıksız"
+            raise TurengError(f"beklenmeyen sayfa geldi: '{title[:80]}'")
         return {"found": False, "suggestions": suggestions}
 
     best = max(tables, key=score_table)
