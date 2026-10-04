@@ -10,6 +10,7 @@ ve 5 örnek cümlesini gönderir.
 """
 
 import asyncio
+import functools
 import hashlib
 import html
 import logging
@@ -228,6 +229,38 @@ async def correct_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --------------------------------------------------------------------------- #
 # Kelime defteri ve tekrar sınavı
 # --------------------------------------------------------------------------- #
+def db_error_message(exc):
+    """MongoDB hatalarını anlaşılır Türkçe açıklamaya çevirir; başka hatalar için None."""
+    if not type(exc).__module__.startswith(("pymongo", "bson")):
+        return None
+    name, text = type(exc).__name__, str(exc).lower()
+    if "auth" in text:
+        return ("Veritabanı kullanıcı adı ya da şifresi yanlış. MONGODB_URI içindeki "
+                "<db_password> kısmını veritabanı kullanıcısının şifresiyle değiştirdin mi?")
+    if name in ("InvalidURI", "ConfigurationError") or "escaped" in text:
+        return ("MONGODB_URI adresi hatalı biçimde. Adresi Atlas'tan yeniden kopyala; şifrede "
+                "@ : / # gibi özel karakterler varsa sadece harf-rakamdan oluşan bir şifre seç.")
+    if name in ("ServerSelectionTimeoutError", "NetworkTimeout", "AutoReconnect"):
+        return ("Veritabanına ulaşılamadı. Atlas'ta Security → Network Access bölümünde "
+                "0.0.0.0/0 (Allow access from anywhere) izni verildi mi?")
+    return f"Veritabanı hatası ({name})."
+
+
+def db_guard(handler):
+    """Defteri kullanan komutlarda veritabanı hatasını kullanıcıya açıkça söyle."""
+    @functools.wraps(handler)
+    async def wrapper(update, context):
+        try:
+            return await handler(update, context)
+        except Exception as exc:
+            message = db_error_message(exc)
+            if message is None:
+                raise
+            log.warning("Veritabanı hatası: %r", exc)
+            await update.effective_message.reply_text(f"⚠️ {message}")
+    return wrapper
+
+
 def save_to_notebook(uid, r):
     """Aranan kelimeyi deftere ekler; veritabanı sorunu aramayı bozmasın."""
     entry = defter.entry_from_lookup(r)
@@ -240,6 +273,7 @@ def save_to_notebook(uid, r):
         return False
 
 
+@db_guard
 async def show_notebook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -264,6 +298,7 @@ async def show_notebook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode=ParseMode.HTML)
 
 
+@db_guard
 async def delete_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -276,6 +311,7 @@ async def delete_word(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🗑 {removed} defterden çıkarıldı." if removed else f"'{text}' defterde bulunamadı.")
 
 
+@db_guard
 async def start_quiz(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -364,6 +400,7 @@ async def handle_quiz_button(query, context):
 # --------------------------------------------------------------------------- #
 # Günün kelimesi
 # --------------------------------------------------------------------------- #
+@db_guard
 async def daily_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_allowed(update):
         return
@@ -509,6 +546,7 @@ async def lookup_and_reply(message, context, word, uid):
         await send_audio(context, message.chat_id, r["english"], r["tureng_audio"])
 
 
+@db_guard
 async def handle_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
